@@ -3,7 +3,7 @@
 
 Credentials live in the macOS Keychain under service `zoho-mail-agent` and are read
 on demand; nothing is written to this repo and nothing is echoed to stdout. The OAuth
-scopes are read-only by construction (see SCOPES in setup.md), so an agent holding
+scopes are read-only by construction (see README.md), so an agent holding
 this tool cannot send, move or delete mail even if it wants to.
 
 Commands
@@ -55,8 +55,9 @@ def keychain(account: str) -> str:
         die(
             f"missing Keychain item: service={KEYCHAIN_SERVICE} account={account}\n"
             # realpath, not abspath: this script is reached through a symlink on PATH,
-            # and abspath would point the reader at a setup.md that is not there.
-            f"See {os.path.join(os.path.dirname(os.path.realpath(__file__)), 'setup.md')}"
+            # and abspath would point the reader at a README that is not there.
+            f"Run ./bootstrap.sh -- see "
+            f"{os.path.join(os.path.dirname(os.path.realpath(__file__)), 'README.md')}"
         )
     return out.stdout.strip()
 
@@ -122,7 +123,7 @@ def api(path: str, params: dict | None = None) -> dict:
                 "\n\nA 401/403 here is usually the SCOPE, not the token: this client is "
                 "minted read-only, so any write path is refused by design. If reads also "
                 "fail, the refresh token was issued for a narrower scope than the command "
-                "needs — re-mint it (setup.md step 3)."
+                "needs — re-mint it (README.md step 2)."
             )
         die(f"API HTTP {e.code} on {path}: {detail}")
 
