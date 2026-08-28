@@ -44,21 +44,50 @@ def die(msg: str, code: int = 1):
     raise SystemExit(code)
 
 
+ENV_VARS = {
+    "client_id": "ZOHO_CLIENT_ID",
+    "client_secret": "ZOHO_CLIENT_SECRET",
+    "refresh_token": "ZOHO_REFRESH_TOKEN",
+}
+
+
 def keychain(account: str) -> str:
-    """Fetch one secret. Never logged, never returned in any command's output."""
+    """Fetch one secret. Never logged, never returned in any command's output.
+
+    Three sources, in order: the environment (for containers and CI, where no
+    keyring daemon exists), the macOS Keychain, then libsecret on Linux. The
+    environment comes first so a deployment can override without clearing a
+    keyring it may not even have.
+    """
+    env = os.environ.get(ENV_VARS[account])
+    if env:
+        return env.strip()
+
+    if sys.platform == "darwin":
+        cmd = ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"]
+        store = "macOS Keychain"
+    else:
+        cmd = ["secret-tool", "lookup", "service", KEYCHAIN_SERVICE, "account", account]
+        store = "libsecret (secret-tool)"
+
     try:
-        out = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"],
-            capture_output=True, text=True, check=True,
+        out = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except FileNotFoundError:
+        die(
+            f"{store} is not available on this machine.\n"
+            f"Either install it, or supply the credential in the environment:\n"
+            f"  export {ENV_VARS[account]}=..."
         )
     except subprocess.CalledProcessError:
         die(
-            f"missing Keychain item: service={KEYCHAIN_SERVICE} account={account}\n"
+            f"no stored credential for {account!r} (service={KEYCHAIN_SERVICE}, {store}).\n"
             # realpath, not abspath: this script is reached through a symlink on PATH,
             # and abspath would point the reader at a README that is not there.
             f"Run ./bootstrap.sh -- see "
             f"{os.path.join(os.path.dirname(os.path.realpath(__file__)), 'README.md')}"
         )
+    if not out.stdout.strip():
+        die(f"stored credential for {account!r} is empty; re-run ./bootstrap.sh")
     return out.stdout.strip()
 
 

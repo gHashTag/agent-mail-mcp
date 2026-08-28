@@ -48,10 +48,21 @@ if [ -z "$REFRESH" ]; then
   exit 1
 fi
 
+store_secret() {  # $1=account $2=value -- never echoed
+  case "$(uname -s)" in
+    Darwin) security add-generic-password -U -s "$SERVICE" -a "$1" -w "$2" \
+              -D "Zoho Mail read-only agent access" -j "Created by agent-mail-mcp/bootstrap.sh" ;;
+    *)      command -v secret-tool >/dev/null 2>&1 || {
+              echo "secret-tool not found. Install libsecret-tools (Debian/Ubuntu:" >&2
+              echo "  sudo apt install libsecret-tools) or export the three ZOHO_* vars." >&2
+              exit 1; }
+            printf '%s' "$2" | secret-tool store --label="Zoho Mail read-only agent access" \
+              service "$SERVICE" account "$1" ;;
+  esac
+}
+
 for pair in "client_id:${CLIENT_ID}" "client_secret:${CLIENT_SECRET}" "refresh_token:${REFRESH}"; do
-  acct="${pair%%:*}"; val="${pair#*:}"
-  security add-generic-password -U -s "$SERVICE" -a "$acct" -w "$val" \
-    -D "Zoho Mail read-only agent access" -j "Created by tools/zoho-mail/bootstrap.sh"
+  store_secret "${pair%%:*}" "${pair#*:}"
 done
 
 unset CLIENT_SECRET CODE REFRESH RESP
