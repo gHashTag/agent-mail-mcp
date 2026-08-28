@@ -169,6 +169,43 @@ def summary(m: dict) -> dict:
     }
 
 
+# Measured against this mailbox on 2026-08-28, not taken from the docs.
+#
+# `entire` and `content` filter correctly: a nonsense term returns 0, a real term
+# returns a subset. `subject` and `sender` are ACCEPTED but match nothing, whatever
+# the term -- unusable, so they are not offered.
+#
+# Everything else, including the two you would reach for first, `from` and
+# `fromAddress`, behaves exactly like a field name that does not exist: Zoho ignores
+# it and returns the newest messages UNFILTERED, with HTTP 200. `from:contains:arxiv`
+# came back with mail from hh.ru. An agent reads that as "here are the arXiv mails"
+# and is wrong with no error anywhere. Refusing the query is the only safe answer.
+SEARCH_FIELDS = ("entire", "content")
+
+
+def normalise_search(q: str) -> str:
+    """Turn a user query into a searchKey Zoho actually honours.
+
+    A bare word gets wrapped rather than rejected: Zoho answers an unwrapped term
+    with "Invalid search query", which is a confusing failure for the most obvious
+    thing to type.
+    """
+    q = q.strip()
+    if ":" not in q:
+        return f"entire:contains:{q}"
+    field = q.split(":", 1)[0].strip()
+    if field.lower() not in SEARCH_FIELDS:
+        die(
+            f"unsupported search field {field!r}.\n"
+            f"Zoho does not reject an unknown field -- it IGNORES it and returns your "
+            f"newest mail unfiltered, with HTTP 200, so the results would look like "
+            f"matches and would not be.\n"
+            f"Use one of: {', '.join(SEARCH_FIELDS)} -- e.g. entire:contains:{q.split(':')[-1]}\n"
+            f"To match a sender, search the address as text: entire:contains:arxiv.org"
+        )
+    return q
+
+
 def out(obj):
     json.dump(obj, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
@@ -191,6 +228,9 @@ def main():
     p.add_argument("message_id")
     p.add_argument("-F", "--folder", required=False, help="folder id (looked up if omitted)")
     p.add_argument("--raw", action="store_true", help="keep the HTML body as-is")
+    p.add_argument("--full", action="store_true", help="do not truncate the body")
+    p.add_argument("--max-chars", type=int, default=20000,
+                   help="truncate the body at N chars (default 20000)")
 
     p = sub.add_parser("search")
     p.add_argument("query")
@@ -220,7 +260,10 @@ def main():
     aid = account_id()
 
     if a.cmd == "folders":
-        out([{k: d.get(k) for k in ("folderId", "folderName", "path", "unreadCount", "messageCount")}
+        # Zoho's folder payload carries no unreadCount/messageCount. Asking for them
+        # yielded null on every folder, and a null unread count reads as "nothing
+        # unread" -- a wrong answer dressed as an answer. Report what exists.
+        out([{k: d.get(k) for k in ("folderId", "folderName", "path", "folderType", "imapAccess")}
              for d in (api(f"/accounts/{aid}/folders").get("data") or [])])
         return
 
@@ -231,35 +274,56 @@ def main():
         return
 
     if a.cmd == "search":
-        data = api(f"/accounts/{aid}/messages/search",
-                   {"searchKey": a.query, "limit": a.limit, "start": 1}).get("data") or []
-        out([summary(m) for m in data])
+        out([summary(m) for m in api(
+            f"/accounts/{aid}/messages/search",
+            {"searchKey": normalise_search(a.query), "limit": a.limit, "start": 1},
+        ).get("data") or []])
         return
 
     if a.cmd == "read":
-        folder = a.folder
+        # The content endpoint returns exactly two fields, `content` and `messageId` --
+        # no headers at all. Reading subject/from off it gave null on every message,
+        # so the headers come from the summary view, which is also where the
+        # folderId lookup happens. One scan serves both.
+        folder, head = a.folder, None
+        for m in (api(f"/accounts/{aid}/messages/view", {"limit": 200, "start": 1}).get("data") or []):
+            if str(m.get("messageId")) == str(a.message_id):
+                head, folder = m, folder or m.get("folderId")
+                break
         if not folder:
-            # The content endpoint is folder-scoped, so a bare messageId needs a lookup.
-            # Search by id is not offered; scan the recent view instead and say so plainly
-            # if it falls outside that window rather than returning an empty body.
-            for m in (api(f"/accounts/{aid}/messages/view", {"limit": 200, "start": 1}).get("data") or []):
-                if str(m.get("messageId")) == str(a.message_id):
-                    folder = m.get("folderId")
-                    break
-            if not folder:
-                die(f"message {a.message_id} not in the newest 200; pass -F <folderId>")
-        d = api(f"/accounts/{aid}/folders/{folder}/messages/{a.message_id}/content").get("data") or {}
-        body = d.get("content") or ""
-        out({
+            die(f"message {a.message_id} not in the newest 200; pass -F <folderId>")
+
+        raw = (api(f"/accounts/{aid}/folders/{folder}/messages/{a.message_id}/content")
+               .get("data") or {}).get("content") or ""
+        body = raw if a.raw else strip_html(raw)
+
+        # A long thread runs to six figures of characters -- one observed here at
+        # 148,316. Handing that to an agent unannounced buries the rest of its context.
+        # Truncate by default and SAY SO, so a caller can tell a short mail from a
+        # clipped one instead of silently reasoning over a fragment.
+        full = len(body)
+        truncated = not a.full and full > a.max_chars
+        if truncated:
+            body = body[:a.max_chars]
+
+        result = {
             "messageId": a.message_id,
             "folderId": folder,
-            "subject": d.get("subject"),
-            "from": d.get("fromAddress"),
-            "to": d.get("toAddress"),
-            "cc": d.get("ccAddress"),
-            "received": d.get("receivedTime"),
-            "body": body if a.raw else strip_html(body),
-        })
+            "subject": (head or {}).get("subject"),
+            "from": (head or {}).get("fromAddress") or (head or {}).get("sender"),
+            "to": (head or {}).get("toAddress"),
+            "cc": (head or {}).get("ccAddress"),
+            "received": summary(head)["received"] if head else None,
+            "body_chars": full,
+            "truncated": truncated,
+            "body": body,
+        }
+        if truncated:
+            result["note"] = (f"body truncated to {a.max_chars} of {full} chars; "
+                              f"re-run with --full or a larger --max-chars")
+        if head is None:
+            result["note"] = "headers unavailable: message is outside the newest 200"
+        out(result)
         return
 
 

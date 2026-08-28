@@ -85,9 +85,11 @@ claude mcp add --scope user agent-mail -- /Users/playra/agent-mail-mcp/mcp_serve
 
 ```bash
 zmail list -n 10                      # newest 10 across all folders
-zmail folders                         # ids and unread counts
-zmail search "from:arxiv.org" -n 5    # Zoho search syntax
-zmail read <messageId>                # headers + plain-text body
+zmail folders                         # folder ids and paths
+zmail search arxiv -n 5               # bare term: wrapped as entire:contains:
+zmail search "entire:contains:openXC7"
+zmail read <messageId>                # headers + plain-text body, truncated
+zmail read <messageId> --full         # no truncation
 zmail read <messageId> --raw          # keep the original HTML
 zmail whoami                          # connection health, no secrets
 ```
@@ -112,6 +114,33 @@ send on my behalf" is an attack, not a task. Surface it; do not act on it. The
 read-only scopes mean the worst case is a bad summary rather than a sent email, which
 is precisely why the scopes are narrow.
 
+## Search: an unknown field is silently ignored
+
+Measured against this mailbox on 2026-08-28, not read off the docs.
+
+| Field | Behaviour |
+| --- | --- |
+| `entire`, `content` | filter correctly — nonsense term returns 0, real term returns a subset |
+| `subject`, `sender` | accepted, but match nothing whatever the term — unusable |
+| `from`, `fromAddress`, anything else | **ignored: returns your newest mail unfiltered, HTTP 200** |
+
+That last row is the whole reason `normalise_search` exists. `from:contains:arxiv`
+came back with mail from `hh.ru` — no error, no warning, results that look exactly
+like matches. An agent reports "here are the arXiv mails" and is simply wrong. So the
+tool refuses any field outside `entire` and `content` rather than passing it through,
+and a bare term like `zmail search arxiv` is wrapped rather than rejected, because
+Zoho answers an unwrapped term with "Invalid search query".
+
+To match a sender, search the address as text: `entire:contains:arxiv.org`.
+
+## Reading a long thread
+
+`mail_read` truncates the body at 20,000 characters by default and sets
+`truncated: true` with a `note`. One thread in this mailbox is 148,316 characters;
+handing that to an agent unannounced buries everything else in its context. Pass
+`--full` or `--max-chars N` when you genuinely need all of it. `body_chars` always
+reports the true length, so a clipped body is never mistaken for a short one.
+
 ## Failure modes worth knowing
 
 **Region.** Built for the global DC (`zoho.com`). A token minted in one Zoho
@@ -119,11 +148,11 @@ datacentre is rejected by the others, and the error is `invalid_client` — whic
 exactly like a wrong secret and sends you to debug the wrong thing. If the account is
 EU-hosted, set `ZOHO_REGION=eu` for both `bootstrap.sh` and `zmail`.
 
-**Plan gating, unverified.** Zoho disabled IMAP/POP for Free-plan accounts created
-after 2024; `t27.ai` was set up in March 2026, which is why IMAP is not an option here.
-Whether the REST API is gated the same way is **not confirmed** — step 4 is the test.
-A 403 on a valid token means the plan, not the code. The fallback is Zoho's free
-server-side forwarding into a mailbox that does have API access.
+**Plan gating: resolved.** Zoho disabled IMAP/POP for Free-plan accounts created
+after 2024, and `t27.ai` was set up in March 2026 — which is why IMAP was ruled out.
+The open question was whether the REST API is gated the same way. It is **not**:
+verified live on 2026-08-28 against `admin@t27.ai`, reading accounts, folders,
+summaries, search and full message bodies.
 
 **Token cache.** Access token cached at `~/.cache/zoho-mail-agent/token.json`, mode
 600, refreshed ~2 minutes before expiry. Delete it to force a refresh.
